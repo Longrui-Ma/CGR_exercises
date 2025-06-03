@@ -1,5 +1,6 @@
 //! Manually implemented Effective Volume Limit with priority support
 // Based on the macro expansion of generate_basic_volume_manager but with priority
+// 3 levels of priority, with 0 the highest (TODO: verify this, in bundle.rs lower is higher priority). Critical flag not implemented yet.
 
 use crate::{
     bundle::Bundle,
@@ -24,7 +25,7 @@ pub struct EVLManager {
     /// The total volume at initialization.
     pub original_volume: Volume,
     /// Current Maximum Available Volumes for priorities (C.MAV(p))
-    pub mav: Vec<Volume>,
+    pub mav: [Volume; 3] // modified from Vec<Volume>,
 }
 
 impl EVLManager {
@@ -34,12 +35,12 @@ impl EVLManager {
     ///
     /// * `rate` - The average data rate for this contact.
     /// * `delay` - The link delay for this contact.
-    /// * `original_mav` - Vector of Maximum Available Volumes for each priority level.
+    /// * `original_mav` - Array of Maximum Available Volumes for each priority level.
     ///
     /// # Returns
     ///
     /// A new instance of `EVLManager`.
-    pub fn new(rate: DataRate, delay: Duration, original_mav: Vec<Volume>) -> Self {
+    pub fn new(rate: DataRate, delay: Duration, original_mav: [Volume; 3]) -> Self {
         Self {
             rate,
             delay,
@@ -47,6 +48,10 @@ impl EVLManager {
             original_volume: 0.0,
             mav: original_mav,
         }
+    }    
+    pub fn new_legacy(rate: DataRate, delay: Duration) -> Self { // TODO: trying to keep compatibility with from ion/tvgutil
+        let default_mav = [rate * 10.0, rate * 7.0, rate * 3.0];
+        Self::new(rate, delay, default_mav)
     }
     
     /// Get Maximum Available Volume for a given priority, 
@@ -56,8 +61,7 @@ impl EVLManager {
         if p < self.mav.len() {
             self.mav[p]
         } else {
-            // Return 0 if priority is out of range / not defined.
-            0.0
+            0.0 // Return 0 if priority is out of range / not defined.
         }
     }
     
@@ -73,34 +77,14 @@ impl EVLManager {
                 if self.mav[i] > vol {
                     self.mav[i] -= vol;
                 } else {
-                    self.mav[i] = 0.0; // TODO: once got 0, lower mav can be set to 0 directly.
+                    for j in i ..self.mav.len() {
+                        self.mav[j] = 0.0; // Set all lower priorities to 0.
+                    }
+                    break;
                 }
             }
         }
     }
-    
-    // /// Calculate the Effective Volume Limit for a contact (C.EVL). 
-    // // This implements step 4 of Algorithm 5 in CGR tutorial. TODO: intergrate in ContactManager try_init trait.
-    // fn calculate_evl(
-    //     &self, 
-    //     contact_data: &ContactInfo,
-    //     effective_start_time: Date,
-    //     effective_stop_time: Date,
-    //     bundle: &Bundle
-    // ) -> Volume {
-    //     // Calculate effective duration
-    //     let effective_duration = if effective_stop_time > effective_start_time {
-    //         effective_stop_time - effective_start_time
-    //     } else {
-    //         0.0
-    //     };
-        
-    //     // Calculate maximum volume that can be transmitted during effective duration.
-    //     let max_volume = effective_duration * contact_data.rate;
-
-    //     // EVL is the minimum of max_volume and mav
-    //     max_volume.min(self.get_mav(bundle.priority))
-    // }
 }
 
 // Using the ContactManager trait originated in mod.rs to implement the methods for EVLManager.
@@ -123,12 +107,7 @@ impl ContactManager for EVLManager {
         contact_data: &ContactInfo,
         at_time: Date,
         bundle: &Bundle,
-    ) -> Option<ContactManagerTxData> {
-        // Check if there's enough volume available for this priority
-        if bundle.size > self.get_mav(bundle.priority) {
-            return None;
-        }
-        
+    ) -> Option<ContactManagerTxData> {        
         // Determine the effective start and effective end time.
         let tx_start = if contact_data.start > at_time {
             contact_data.start
@@ -139,7 +118,7 @@ impl ContactManager for EVLManager {
         
         // Check if transmission would end after contact end
         if tx_end > contact_data.end { 
-            return None; // needed in algo 5 part 1, TODO: verify this.
+            return None; // needed in algo 5 part 1, TODO: verify if this is needed.
         }
 
         // Check if arrival time is after bundle expiration
@@ -147,7 +126,16 @@ impl ContactManager for EVLManager {
         if arrival > bundle.expiration {
             return None;
         }
-        
+
+        // Check C.EVL if there's enough volume available for this priority.
+        // Instead of skipping a route using R.EVL, check each C.EVL in R.hops loop.
+        // TODO: Since we check start/end/expiration time in dry_run_rx already,
+        // it's reasonable to check C.EVL here as well,
+        // verify if this is better than having a negative R.EVL.
+        let max_volume = (tx_end - tx_start) * self.rate;
+        if bundle.size > max_volume.min(self.get_mav(bundle.priority)) {
+            return None;
+        }
         // Return transmission data
         Some(ContactManagerTxData {
             tx_start,
@@ -191,8 +179,8 @@ impl ContactManager for EVLManager {
         None
     }
     
-    /// Initializes the EVL manager by setting the original volume based on contact duration, rate and priority.
-    ///
+    /// Initializes the EVL manager by setting the original volume based on contact duration and rate.
+    /// Mostly to satify the ContactManager trait.
     /// # Arguments
     ///
     /// * `contact_data` - Reference to the contact information.
@@ -200,26 +188,12 @@ impl ContactManager for EVLManager {
     /// # Returns
     ///
     /// Returns `true` if initialization is successful.
-    // fn try_init(&mut self, contact_data: &ContactInfo, bundle: &Bundle) -> bool {
-    //     // Calculate maximum volume that can be transmitted during effective duration.
-    //     let max_vol = (contact_data.end - contact_data.start) * self.rate;
-        
-    //     // Set the original_volume to contact Effective Volume Limit (C.EVL).
-    //     self.original_volume = max_vol.min(self.get_mav(bundle.priority));      
-    //     true
-    // } // TODO: bundle input must exist?
-    fn try_init(&mut self, contact_data: &ContactInfo, bundle: Option<&Bundle>) -> bool {
+    fn try_init(&mut self, contact_data: &ContactInfo) -> bool {
         // Calculate maximum volume that can be transmitted during effective duration.
         let max_vol = (contact_data.end - contact_data.start) * self.rate;
-        
-        // Set the original_volume to contact Effective Volume Limit (C.EVL).
-        self.original_volume = match bundle {
-            Some(b) => max_vol.min(self.get_mav(b.priority)),
-            None => max_vol,
-        };        
+           
         true
     }
-
     
     /// Returns the original volume of the contact.
     ///
@@ -237,7 +211,7 @@ impl crate::parsing::DispatchParser<EVLManager> for EVLManager {}
 
 /// Implements the `Parser` trait for `EVLManager`, allowing the manager to be parsed from a lexer.
 impl crate::parsing::Parser<EVLManager> for EVLManager {
-    /// Parses an `EVLManager` from the lexer, extracting the rate and delay.
+    /// Parses an `EVLManager` from the lexer, extracting the rate, delay and original MAV.
     ///
     /// # Arguments
     ///
@@ -252,7 +226,7 @@ impl crate::parsing::Parser<EVLManager> for EVLManager {
     ) -> crate::parsing::ParsingState<Self> {
         let delay: Duration;
         let rate: DataRate;
-        let original_mav: Vec<Volume>;
+        let original_mav: [Volume; 3];
 
         let rate_state = <crate::types::DataRate as crate::types::Token<crate::types::DataRate>>::parse(lexer);
         match rate_state {
@@ -278,17 +252,20 @@ impl crate::parsing::Parser<EVLManager> for EVLManager {
             }
         }
 
-        // let mav_state = <Vec<Volume> as crate::types::Token<Vec<Volume>>>::parse(lexer);
-        // TODO: modify all Vec<Volume> to VecWrapper<Volume> or do a conversion?
-        let mav_state = <Vec<Volume> as crate::types::Token<crate::types::VecWrapper<Volume>>>::parse(lexer);
-        match mav_state {
-            crate::parsing::ParsingState::Finished(value) => original_mav = value,
-            crate::parsing::ParsingState::Error(msg) => return crate::parsing::ParsingState::Error(msg),
-            crate::parsing::ParsingState::EOF => {
-                return crate::parsing::ParsingState::Error(format!(
-                    "Parsing MAV failed ({})",
-                    lexer.get_current_position()
-                ))
+        let mut original_mav = [0.0_f64; 3];
+        for i in 0..3 {
+            match <Volume as crate::types::Token<crate::types::Volume>>::parse(lexer) {
+                crate::parsing::ParsingState::Finished(value) => original_mav[i] = value,
+                crate::parsing::ParsingState::Error(msg) => {
+                    return crate::parsing::ParsingState::Error(msg)
+                }
+                crate::parsing::ParsingState::EOF => {
+                    return crate::parsing::ParsingState::Error(format!(
+                        "Parsing MAV of priority {} failed ({})",
+                        i + 1,
+                        lexer.get_current_position()
+                    ))
+                }
             }
         }
 
