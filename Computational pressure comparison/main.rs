@@ -1,5 +1,5 @@
 #![allow(warnings)]
-// RUST_BACKTRACE=1 cargo run --features "contact_work_area,contact_suppression,first_depleted" ./02_ptvg.json
+// RUST_BACKTRACE=1 cargo run --features "contact_work_area,first_depleted" ./02_ptvg_80_60950_3d.json
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::SystemTime;
@@ -12,12 +12,14 @@ use std::{
 
 use a_sabr::{
     bundle::Bundle,
-    contact_manager::legacy::evl::EVLManager,
+    contact_manager::{
+        legacy::evl::EVLManager, legacy::qd::QDManager, seg::SegmentationManager, ContactManager,
+    },
     contact_plan::from_tvgutil_file::TVGUtilContactPlan,
     node_manager::none::NoManagement,
     route_storage::{cache::TreeCache, table::RoutingTable},
     routing::{
-        aliases::{SpsnMpt, SpsnNodeGraph,SpsnContactGraph, CgrFirstEndingMpt, CgrFirstDepletedMpt, CgrFirstEndingNodeGraph, CgrFirstDepletedNodeGraph, CgrFirstEndingContactGraph, CgrFirstDepletedContactGraph},
+        aliases::{build_generic_router, SpsnOptions},
         Router,
     },
 };
@@ -33,7 +35,7 @@ where
 }
 
 fn batch_compute_times<NM, CM>(
-    routers: &mut [(&str, &mut dyn Router<NM, CM>)],
+    routers: &mut [Box<dyn Router<NM, CM>>],
     node_count: u16,
     bundle_count: usize,
     bundle_min_size: i32,
@@ -44,42 +46,29 @@ where
     NM: a_sabr::node_manager::NodeManager + 'static,
     CM: a_sabr::contact_manager::ContactManager + 'static,
 {
-    // create Vec<Duration> for each router
+    // create Vec<Duration> for each router to track routing durations
     let mut durations = vec![Vec::with_capacity(bundle_count); routers.len()];
     for i in 0..bundle_count {
         let mut rng = StdRng::seed_from_u64((i + 1) as u64);
-        // let size = rng.random_range(bundle_min_size..=bundle_max_size) as f64;
+        let size = rng.random_range(bundle_min_size..=bundle_max_size) as f64;
         // pick randomly the source and the destination
-        // let src = rng.random_range(0..node_count);
-        // let mut dst = rng.random_range(0..node_count);
-        // while dst == src {
-        //     dst = rng.random_range(0..node_count);
-        // }
-        let size = 40.0;
-        let src = 0;
-        let dst = 1;
+        let src = rng.random_range(0..node_count);
+        let mut dst = rng.random_range(0..node_count);
+        while dst == src {
+            dst = rng.random_range(0..node_count);
+        }
         let bundle = Bundle {
             source: src,
             destinations: vec![dst], // unicast
             priority: 1,
             size,
-            expiration: 10_000.0,
+            expiration: start_time + 30_758_400.0, // never expires in 365 days
         };
-        println!(
-            "......Routing bundle {}: src = {}, dst = {}, size = {}",
-            i, bundle.source, bundle.destinations[0], bundle.size
-        );
-        for (j, (_name, router)) in routers.iter_mut().enumerate() {
-            println!(
-                "{}, Routing bundle {} with router {}...",
-                time_now(),
-                i,
-                _name
-            );
-            let d = run_time(*router, &bundle, start_time);
+        for (j, router_box) in routers.iter_mut().enumerate() {
+            let router_ref: &mut dyn Router<NM, CM> = router_box.as_mut();
+            let d = run_time(router_ref, &bundle, start_time);
             durations[j].push(d);
         }
-
         // if i != 0 && (i+1) % 100 == 0 {
         //     println!("...Routed {} bundles.", i+1);
         // }
@@ -100,113 +89,130 @@ fn time_now() -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <cp_file>", args[0]);
-        std::process::exit(1);
+/// CM（EVL, QD, Seg）measure and print
+fn measure_for<CM>(
+    cm_label: &str,
+    router_configs: &Vec<(&'static str, Option<SpsnOptions>)>,
+    router_names: &Vec<&'static str>,
+    cp_file: &str,
+    node_count: u16,
+    bundle_count: usize,
+    bundle_min_size: i32,
+    bundle_max_size: i32,
+    start_time: f64,
+) where
+    CM: ContactManager + 'static,
+{
+    let mut routers_box: Vec<Box<dyn Router<NoManagement, EVLManager>>> = Vec::new();
+    for (name, options) in router_configs.into_iter() {
+        let (nodes, contacts) = TVGUtilContactPlan::parse::<NoManagement, EVLManager>(cp_file)
+            .expect("!!!Failed to parse contact plan");
+        let router = build_generic_router(name, nodes, contacts, options.clone());
+        routers_box.push(router);
     }
 
-    println!("{}, Working with cp {}.", time_now(), args[1]);
-
-    let start_time = 1751402805.0; // 2024-06-01T00:00:05Z
-    // assume no fragmentation
-    let node_count = 80;
-    let bundle_count = 1;
-    let bundle_min_size = 8; // 8 bytes UDP headers
-    let bundle_max_size = 1_500; // 1500 bytes MTU
-
-    // routers
-    let (nodes_spsn_mpt, contacts_spsn_mpt) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let spsn_mpt_table = Rc::new(RefCell::new(TreeCache::new(true, false, 10)));
-    let mut spsn_mpt =
-        SpsnMpt::<NoManagement, EVLManager>::new(nodes_spsn_mpt, contacts_spsn_mpt, spsn_mpt_table, false);
-
-    let (nodes_spsn_ng, contacts_spsn_ng) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let spsn_ng_table = Rc::new(RefCell::new(TreeCache::new(true, false, 10)));
-    let mut spsn_ng =
-        SpsnNodeGraph::<NoManagement, EVLManager>::new(nodes_spsn_ng, contacts_spsn_ng, spsn_ng_table, false);
-
-    let (nodes_spsn_cg, contacts_spsn_cg) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let spsn_cg_table = Rc::new(RefCell::new(TreeCache::new(true, false, 10)));
-    let mut spsn_cg =
-        SpsnContactGraph::<NoManagement, EVLManager>::new(nodes_spsn_cg, contacts_spsn_cg, spsn_cg_table, false);
-
-    let (nodes_cgr_fe_mpt, contacts_cgr_fe_mpt) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fe_mpt_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fe_mpt =
-        CgrFirstEndingMpt::<NoManagement, EVLManager>::new(nodes_cgr_fe_mpt, contacts_cgr_fe_mpt, cgr_fe_mpt_table);
-
-    let (nodes_cgr_fe_ng, contacts_cgr_fe_ng) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fe_ng_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fe_ng =
-        CgrFirstEndingNodeGraph::<NoManagement, EVLManager>::new(nodes_cgr_fe_ng, contacts_cgr_fe_ng, cgr_fe_ng_table);
-
-    let (nodes_cgr_fe_cg, contacts_cgr_fe_cg) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fe_cg_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fe_cg =
-        CgrFirstEndingContactGraph::<NoManagement, EVLManager>::new(nodes_cgr_fe_cg, contacts_cgr_fe_cg, cgr_fe_cg_table);  
-
-    let (nodes_cgr_fd_mpt, contacts_cgr_fd_mpt) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fd_mpt_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fd_mpt =
-        CgrFirstDepletedMpt::<NoManagement, EVLManager>::new(nodes_cgr_fd_mpt, contacts_cgr_fd_mpt, cgr_fd_mpt_table);
-
-    let (nodes_cgr_fd_ng, contacts_cgr_fd_ng) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fd_ng_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fd_ng =
-        CgrFirstDepletedNodeGraph::<NoManagement, EVLManager>::new(nodes_cgr_fd_ng, contacts_cgr_fd_ng, cgr_fd_ng_table);
-
-    let (nodes_cgr_fd_cg, contacts_cgr_fd_cg) =
-        TVGUtilContactPlan::parse::<NoManagement, EVLManager>(&args[1]).unwrap();
-    let cgr_fd_cg_table = Rc::new(RefCell::new(RoutingTable::new()));
-    let mut cgr_fd_cg =
-        CgrFirstDepletedContactGraph::<NoManagement, EVLManager>::new(nodes_cgr_fd_cg, contacts_cgr_fd_cg, cgr_fd_cg_table);
-
-    macro_rules! entry {
-        ($r:ident) => {
-            (
-                stringify!($r),
-                &mut $r as &mut dyn Router<NoManagement, EVLManager>,
-            )
-        };
-    }
-    let mut routers: Vec<(&str, &mut dyn Router<NoManagement, EVLManager>)> =
-        vec![entry!(spsn_mpt), entry!(spsn_ng), entry!(spsn_cg), entry!(cgr_fe_mpt), entry!(cgr_fe_ng), entry!(cgr_fd_mpt), entry!(cgr_fd_ng), entry!(cgr_fe_cg), entry!(cgr_fd_cg)];
-
-    println!("{}, Measuring compute times for all routers:", time_now());
+    println!(
+        "{}, Measuring compute time for all routers with {}",
+        time_now(),
+        cm_label
+    );
     let compute_times = batch_compute_times(
-        &mut routers,
+        &mut routers_box,
         node_count,
         bundle_count,
         bundle_min_size,
         bundle_max_size,
         start_time,
     );
-    println!(
-        "{}, Finished measuring compute times for all routers.\n",
-        time_now()
-    );
-
-    for ((name, _), times) in routers.iter().zip(compute_times.iter()) {
+    // println!(
+    //     "{}, Finished measuring compute times for all routers with {}.\n",
+    //     time_now(),
+    //     cm_label
+    // );
+    for (i, name) in router_names.iter().enumerate() {
         // println!("{}: {:?}", name, times);
+        let times = &compute_times[i];
         let sum: Duration = times.iter().sum();
         let avg = (sum / (times.len() as u32)).as_millis();
         let max = (*times.iter().max().unwrap()).as_millis();
-        let min = (*times.iter().min().unwrap()).as_millis();
-
+        let min = (*times.iter().min().unwrap()).as_micros();
         println!(
-            "{:30}: total = {:<20?}, avg = {:>8?}ms, max = {:>8?}ms, min = {:>8?}ms",
-            name, sum, avg, max, min
+            "{:30}: total = {:>8?} ms, max = {:>8?} ms, min = {:>8?} us, avg = {:>8?} ms",
+            name, sum.as_millis(), max, min, avg
         );
     }
-    println!("\n{}, Finished compute stats.", time_now());
+    // println!("\n{}, Finished compute stats with.", time_now(), cm_label);
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        println!("Usage: {} <cp_file>", args[0]);
+        std::process::exit(1);
+    }
+    let cp_file = &args[1];
+    println!("{}, Working with cp {}.", time_now(), cp_file);
+    let start_time = 1752098400.0; // 2025-07-10T00:00:00Z
+                                   // assume no fragmentation？
+    let node_count = 84;
+    let bundle_count = 100;
+    let bundle_min_size = 3_000;
+    let bundle_max_size = 300_000;
+
+    // generate routers
+    let spsn_options = Some(SpsnOptions {
+        check_size: true,
+        check_priority: false,
+        max_entries: 10,
+    });
+
+    let router_configs = vec![
+        ("SpsnMpt", spsn_options.clone()),
+        ("SpsnNodeGraph", spsn_options.clone()),
+        ("SpsnContactGraph", spsn_options.clone()),
+        ("VolCgrMpt", spsn_options.clone()),
+        ("VolCgrNodeGraph", spsn_options.clone()),
+        ("VolCgrContactGraph", spsn_options.clone()),
+        ("CgrFirstEndingMpt", None),
+        ("CgrFirstEndingNodeGraph", None),
+        ("CgrFirstEndingContactGraph", None),
+        ("CgrFirstDepletedMpt", None),
+        ("CgrFirstDepletedNodeGraph", None),
+        ("CgrFirstDepletedContactGraph", None),
+    ];
+    let router_names: Vec<&str> = router_configs.iter().map(|&(name, _)| name).collect();
+
+    measure_for::<EVLManager>(
+        "EVLManager",
+        &router_configs,
+        &router_names,
+        cp_file,
+        node_count,
+        bundle_count,
+        bundle_min_size,
+        bundle_max_size,
+        start_time,
+    );
+    measure_for::<QDManager>(
+        "QDManager",
+        &router_configs,
+        &router_names,
+        cp_file,
+        node_count,
+        bundle_count,
+        bundle_min_size,
+        bundle_max_size,
+        start_time,
+    );
+    measure_for::<SegmentationManager>(
+        "SegmentationManager",
+        &router_configs,
+        &router_names,
+        cp_file,
+        node_count,
+        bundle_count,
+        bundle_min_size,
+        bundle_max_size,
+        start_time,
+    );
 }
