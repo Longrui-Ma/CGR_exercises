@@ -1,7 +1,9 @@
 #![allow(warnings)]
+use a_sabr::bundle;
 // RUST_BACKTRACE=1 cargo run --features "contact_work_area,first_depleted" ./02_ptvg_80_60950_3d.json
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use core::time;
 use std::time::SystemTime;
 use std::{
     cell::RefCell,
@@ -24,58 +26,6 @@ use a_sabr::{
     },
 };
 
-fn run_time<NM, CM>(router: &mut dyn Router<NM, CM>, bundle: &Bundle, start_time: f64) -> Duration
-where
-    NM: a_sabr::node_manager::NodeManager + 'static,
-    CM: a_sabr::contact_manager::ContactManager + 'static,
-{
-    let start = Instant::now();
-    router.route(bundle.source, bundle, start_time, &Vec::new());
-    start.elapsed()
-}
-
-fn batch_compute_times<NM, CM>(
-    routers: &mut [Box<dyn Router<NM, CM>>],
-    node_count: u16,
-    bundle_count: usize,
-    bundle_min_size: i32,
-    bundle_max_size: i32,
-    start_time: f64,
-) -> Vec<Vec<Duration>>
-where
-    NM: a_sabr::node_manager::NodeManager + 'static,
-    CM: a_sabr::contact_manager::ContactManager + 'static,
-{
-    // create Vec<Duration> for each router to track routing durations
-    let mut durations = vec![Vec::with_capacity(bundle_count); routers.len()];
-    for i in 0..bundle_count {
-        let mut rng = StdRng::seed_from_u64((i + 1) as u64);
-        let size = rng.random_range(bundle_min_size..=bundle_max_size) as f64;
-        // pick randomly the source and the destination
-        let src = rng.random_range(0..node_count);
-        let mut dst = rng.random_range(0..node_count);
-        while dst == src {
-            dst = rng.random_range(0..node_count);
-        }
-        let bundle = Bundle {
-            source: src,
-            destinations: vec![dst], // unicast
-            priority: 1,
-            size,
-            expiration: start_time + 30_758_400.0, // never expires in 365 days
-        };
-        for (j, router_box) in routers.iter_mut().enumerate() {
-            let router_ref: &mut dyn Router<NM, CM> = router_box.as_mut();
-            let d = run_time(router_ref, &bundle, start_time);
-            durations[j].push(d);
-        }
-        // if i != 0 && (i+1) % 100 == 0 {
-        //     println!("...Routed {} bundles.", i+1);
-        // }
-    }
-    durations
-}
-
 // Returns the current UTC time in HH:MM:SS format
 fn time_now() -> String {
     let sec_since_epoch = SystemTime::now()
@@ -89,6 +39,76 @@ fn time_now() -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+fn run_time<NM, CM>(router: &mut dyn Router<NM, CM>, bundle: &Bundle, start_time: f64) -> (Duration, bool)
+where
+    NM: a_sabr::node_manager::NodeManager + 'static,
+    CM: a_sabr::contact_manager::ContactManager + 'static,
+{
+    let start = Instant::now();
+    let route_result = router.route(bundle.source, bundle, start_time, &Vec::new());
+    let elapsed = start.elapsed();
+    let is_success = route_result.is_some();
+    (elapsed, is_success)
+}
+
+fn batch_compute_times<NM, CM>(
+    routers: &mut [Box<dyn Router<NM, CM>>],
+    node_count: u16,
+    bundle_max_count: usize,
+    bundle_min_size: f64,
+    bundle_max_size: f64,
+    start_time: f64,
+    end_time: f64,
+    throttle_on: bool,
+    elapse_cap: Duration,
+) -> (Vec<Vec<Duration>>, Vec<f64>, Vec<f64>)
+where
+    NM: a_sabr::node_manager::NodeManager + 'static,
+    CM: a_sabr::contact_manager::ContactManager + 'static,
+{
+    // create Vec<Duration> for each router to track routing durations
+    let mut durations = vec![Vec::new(); routers.len()];
+    let mut bundle_schedule_rate:Vec<f64> = Vec::with_capacity(routers.len());
+    let mut failure_rate:Vec<f64> = Vec::with_capacity(routers.len());
+    for (router_idx, router_box) in routers.iter_mut().enumerate() {
+        let router_ref: &mut dyn Router<NM, CM> = router_box.as_mut();
+        let mut elapse: Duration = Duration::new(0, 0);
+        let mut failure_count = 0.0;
+        let mut bundle_count = bundle_max_count;
+        for i in 0..bundle_max_count {
+            if elapse > elapse_cap && throttle_on {
+                bundle_count = i;
+                break;
+            }
+            let mut rng = StdRng::seed_from_u64((i + 1) as u64);
+            let size = rng.random_range(bundle_min_size..=bundle_max_size);
+            // pick randomly the source and the destination
+            let src = rng.random_range(0..node_count);
+            let mut dst = rng.random_range(0..node_count);
+            while dst == src {
+                dst = rng.random_range(0..node_count);
+            }
+            let bundle = Bundle {
+                source: src,
+                destinations: vec![dst], // unicast
+                priority: 1,
+                size,
+                expiration: end_time,
+            };           
+            let (d, is_success) = run_time(router_ref, &bundle, start_time);
+            elapse += d;
+            if !is_success { failure_count += 1.0; };
+            durations[router_idx].push(d);
+        }
+        bundle_schedule_rate.push((bundle_count as f64 + 1.0) / (elapse.as_nanos() as f64) / 1e-9); // (i+1) as f64 / durations[router_idx].iter().sum::<Duration>().as_nanos() as f64 / 1e-9,
+        failure_rate.push(failure_count / (bundle_count as f64 + 1.0));
+        // if i != 0 && (i+1) % 100 == 0 {
+        //     println!("...Routed {} bundles.", i+1);
+        // }
+    }
+    (durations, bundle_schedule_rate, failure_rate)
+}
+
 /// CM（EVL, QD, Seg）measure and print
 fn measure_for<CM>(
     cm_label: &str,
@@ -96,10 +116,13 @@ fn measure_for<CM>(
     router_names: &Vec<&'static str>,
     cp_file: &str,
     node_count: u16,
-    bundle_count: usize,
-    bundle_min_size: i32,
-    bundle_max_size: i32,
+    bundle_max_count: usize,
+    bundle_min_size: f64,
+    bundle_max_size: f64,
     start_time: f64,
+    end_time: f64,
+    throttle_on: bool,
+    elapse_cap: Duration,
 ) where
     CM: ContactManager + 'static,
 {
@@ -116,13 +139,16 @@ fn measure_for<CM>(
         time_now(),
         cm_label
     );
-    let compute_times = batch_compute_times(
+    let (compute_times, schedule_rate, failure_rate) = batch_compute_times(
         &mut routers_box,
         node_count,
-        bundle_count,
+        bundle_max_count,
         bundle_min_size,
         bundle_max_size,
         start_time,
+        end_time,
+        throttle_on,
+        elapse_cap,
     );
     // println!(
     //     "{}, Finished measuring compute times for all routers with {}.\n",
@@ -132,40 +158,68 @@ fn measure_for<CM>(
     for (i, name) in router_names.iter().enumerate() {
         // println!("{}: {:?}", name, times);
         let times = &compute_times[i];
-        let sum: Duration = times.iter().sum();
-        let avg = (sum / (times.len() as u32)).as_millis();
-        let max = (*times.iter().max().unwrap()).as_millis();
-        let min = (*times.iter().min().unwrap()).as_micros();
+        let sum = times.iter().sum::<Duration>().as_nanos() as f64; // nanoseconds
+        let avg = (sum / (times.len() as f64)) / 1e6; // milliseconds
+        let max = (*times.iter().max().unwrap()).as_nanos();
+        let min = (*times.iter().min().unwrap()).as_nanos();
         println!(
-            "{:30}: total = {:>8?} ms, max = {:>8?} ms, min = {:>8?} us, avg = {:>8?} ms",
-            name, sum.as_millis(), max, min, avg
+            "{:30}: total = {:>5.2} s, max = {:>8.2} ms, min = {:>8.2} us, avg = {:>8.2} ms. Schedule rate = {:>8.2} bundles/sec, Failure rate = {:>6.2}%",
+            name,
+            sum / 1e9,
+            max as f64 / 1e6,
+            min as f64 / 1e3,
+            avg,
+            schedule_rate[i],
+            failure_rate[i] * 100.0,
         );
     }
     // println!("\n{}, Finished compute stats with.", time_now(), cm_label);
 }
 
 fn main() {
+    // manual input parameters
+    let data_rate = 9600.0; // field `rate` in `ContactManager` is private
+    let bundle_max_count = 10e6 as usize; // max number of bundles that a router will route
+    let bundle_size_min_ratio = 0.01;
+    let bundle_size_max_ratio = 0.1;
+    let elapse_cap:Duration = Duration::from_secs(2);
+    let throttle_on = true;
+    // parse from file and get contact plan statistics
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         println!("Usage: {} <cp_file>", args[0]);
         std::process::exit(1);
     }
     let cp_file = &args[1];
-    println!("{}, Working with cp {}.", time_now(), cp_file);
-    let start_time = 1752098400.0; // 2025-07-10T00:00:00Z
-                                   // assume no fragmentation？
-    let node_count = 84;
-    let bundle_count = 100;
-    let bundle_min_size = 3_000;
-    let bundle_max_size = 300_000;
-
+    let (nodes_stat, contacts_stat) = TVGUtilContactPlan::parse::<NoManagement, EVLManager>(cp_file)
+        .expect("!!!Failed to parse contact plan");
+    let node_count = nodes_stat.len() as u16;
+    let mut earliest_date = f64::MAX; // earliest contact start time to have bundles without expiration
+    let mut latest_date = 0.0; // latest contact end time to have bundles without expiration
+    let mut total_volume = 0.0;
+    let mut contact_count = 0;
+    for contact in contacts_stat.iter() {
+        if contact.info.start < earliest_date {
+            earliest_date = contact.info.start;
+        }
+        if contact.info.end > latest_date {
+            latest_date = contact.info.end;
+        }
+        let duration = contact.info.end - contact.info.start;
+        // data_rate = contact.manager.rate; // field `rate` in `ContactManager` is private
+        total_volume += duration;
+        contact_count += 1;
+    }
+    let avg_volume = total_volume * data_rate / contact_count as f64;
+    let bundle_min_size = avg_volume * bundle_size_min_ratio;
+    let bundle_max_size = avg_volume * bundle_size_max_ratio;
+    println!("{}, Working with cp {}, \n    which contains {} nodes, {} contacts with an average {} contact volume, \n    first contact at {}, last contact at {}.", time_now(), cp_file, node_count, contact_count, avg_volume, earliest_date, latest_date);
     // generate routers
     let spsn_options = Some(SpsnOptions {
         check_size: true,
         check_priority: false,
         max_entries: 10,
     });
-
     let router_configs = vec![
         ("SpsnMpt", spsn_options.clone()),
         ("SpsnNodeGraph", spsn_options.clone()),
@@ -188,10 +242,13 @@ fn main() {
         &router_names,
         cp_file,
         node_count,
-        bundle_count,
+        bundle_max_count,
         bundle_min_size,
         bundle_max_size,
-        start_time,
+        earliest_date,
+        latest_date,
+        throttle_on,
+        elapse_cap,
     );
     measure_for::<QDManager>(
         "QDManager",
@@ -199,10 +256,13 @@ fn main() {
         &router_names,
         cp_file,
         node_count,
-        bundle_count,
+        bundle_max_count,
         bundle_min_size,
         bundle_max_size,
-        start_time,
+        earliest_date,
+        latest_date,
+        throttle_on,
+        elapse_cap,
     );
     measure_for::<SegmentationManager>(
         "SegmentationManager",
@@ -210,9 +270,12 @@ fn main() {
         &router_names,
         cp_file,
         node_count,
-        bundle_count,
+        bundle_max_count,
         bundle_min_size,
         bundle_max_size,
-        start_time,
+        earliest_date,
+        latest_date,
+        throttle_on,
+        elapse_cap,
     );
 }
