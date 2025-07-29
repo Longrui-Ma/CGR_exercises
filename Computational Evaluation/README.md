@@ -74,14 +74,14 @@ high failure rate before 18 nodes
 ## Fine tuning 3rd grid search (elapse times and bundle sizes)
 The goal of this tuning stage is to **increase the number of valid data points for plotting**, while keeping **simulation results valid** and **runtime low**.  
 ### Compare differences between 2 elapse times
-![Per-Algo Mean±Std over Elapsed Durations (Failure ≤1%)](./img_grid-search/Elapse-time_Figure_1.png")  
-![Mean±Std of Differences Across Durations per Algo (Failure ≤1%)](./img_grid-search/Elapse-time_Figure_2.png")  
-![Overall Mean±Std over Elapsed Durations (Aligned Failure ≤1%)](./img_grid-search/Elapse-time_Figure_3.png")  
-![Overall Mean±Std of Differences Across Durations (Aligned Failure ≤1%)](./img_grid-search/Elapse-time_Figure_4.png")  
-![Per-Algo Mean±Std over bundle sizes (Failure ≤1%)](./img_grid-search/Bundle-Sizes_Figure_1.png")  
-![Mean±Std of Differences Across Bundle Sizes per Algo (Failure ≤1%)](./img_grid-search/Bundle-Sizes_Figure_2.png")  
-![Overall Mean±Std over Bundle Sizes (Aligned Failure ≤1%)](./img_grid-search/Bundle-Sizes_Figure_3.png")  
-![Overall Mean±Std of Differences Across Bundle Sizes (Aligned Failure ≤1%)](./img_grid-search/Bundle-Sizes_Figure_4.png")  
+![Per-Algo Mean±Std over Elapsed Durations (Failure ≤1%)](./plot_grid-search/Elapse-time_Figure_1.png)  
+![Mean±Std of Differences Across Durations per Algo (Failure ≤1%)](./plot_grid-search/Elapse-time_Figure_2.png)  
+![Overall Mean±Std over Elapsed Durations (Aligned Failure ≤1%)](./plot_grid-search/Elapse-time_Figure_3.png)  
+![Overall Mean±Std of Differences Across Durations (Aligned Failure ≤1%)](./plot_grid-search/Elapse-time_Figure_4.png)  
+![Per-Algo Mean±Std over bundle sizes (Failure ≤1%)](./plot_grid-search/Bundle-Sizes_Figure_1.png)  
+![Mean±Std of Differences Across Bundle Sizes per Algo (Failure ≤1%)](./plot_grid-search/Bundle-Sizes_Figure_2.png)  
+![Overall Mean±Std over Bundle Sizes (Aligned Failure ≤1%)](./plot_grid-search/Bundle-Sizes_Figure_3.png)  
+![Overall Mean±Std of Differences Across Bundle Sizes (Aligned Failure ≤1%)](./plot_grid-search/Bundle-Sizes_Figure_4.png)  
 
 ## Computational evaluation and plotting
 ### Computational evaluation design
