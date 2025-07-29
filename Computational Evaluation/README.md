@@ -24,9 +24,9 @@ python3 -m tvgutil.tools.create_rr_tvg --rr s --duration 2592000 --minelev 10 --
 Starting at `-t` UNIX timestamp, there are 40 ground stations and 40 satellites, making a total of 80 nodes. The `start_time` is a UNIX timestamp. The `duration` is specified in seconds. The `--rr s` is used for the inter-satellite link type in the contact plan. `minelev` defines the minimum elevation angle for satellite trajectories-avoid adjusting this too much. `islrange` in km sets the minimum range for inter-satellite links. uplinkrate and downlinkrate specify the data rates.
 
 ### Contact plans generation and run A-SABR crate for grid search and ploting
-* [Contact plan generation](./generate_cp.sh)
-* [Run grid search on win11](./run_asabr.bat)
-* [Run computational evaluation](./run_asabr.sh)
+* [Contact plan generation](./grid-search/generate_cp.sh)
+* [Run grid search on win11](./grid-search/run_asabr.bat)
+* [Run computational evaluation](./grid-search/run_asabr.sh)
 
 ## Fine tuning 1st grid search
 The goal is to have a **overall view** of the run times and failure rates.
